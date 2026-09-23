@@ -18,6 +18,7 @@
 #include <cuda_gl_interop.h>
 
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <fstream>
@@ -64,6 +65,7 @@ void runCuda();
 void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);
 void mousePositionCallback(GLFWwindow* window, double xpos, double ypos);
 void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
+void saveImage();
 
 std::string currentTimeString()
 {
@@ -171,7 +173,13 @@ void cleanupCuda()
 
 void initCuda()
 {
-    cudaGLSetGLDevice(0);
+    cudaError_t result = cudaGLSetGLDevice(0);
+    if (result != cudaSuccess)
+    {
+        fprintf(stderr, "CUDA/OpenGL setup failed: %s. Try the --headless option.\n",
+            cudaGetErrorString(result));
+        exit(EXIT_FAILURE);
+    }
 
     // Clean up on program exit
     atexit(cleanupCuda);
@@ -192,7 +200,13 @@ void initPBO()
 
     // Allocate data for the buffer. 4-channel 8-bit image
     glBufferData(GL_PIXEL_UNPACK_BUFFER, size_tex_data, NULL, GL_DYNAMIC_COPY);
-    cudaGLRegisterBufferObject(pbo);
+    cudaError_t result = cudaGLRegisterBufferObject(pbo);
+    if (result != cudaSuccess)
+    {
+        fprintf(stderr, "CUDA/OpenGL buffer sharing failed: %s. Try the --headless option.\n",
+            cudaGetErrorString(result));
+        exit(EXIT_FAILURE);
+    }
 }
 
 void errorCallback(int error, const char* description)
@@ -227,6 +241,7 @@ bool init()
         return false;
     }
     printf("Opengl Version:%s\n", glGetString(GL_VERSION));
+    printf("Opengl Renderer:%s\n", glGetString(GL_RENDERER));
     //Set up ImGui
 
     IMGUI_CHECKVERSION();
@@ -286,6 +301,9 @@ void RenderImGui()
     //ImGui::Text("counter = %d", counter);
     ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
     ImGui::Checkbox("Sort paths by material", &imguiData->MaterialSortingEnabled);
+    ImGui::Checkbox("Direct area lighting", &imguiData->DirectLightingEnabled);
+    ImGui::Checkbox("Russian roulette", &imguiData->RussianRouletteEnabled);
+    ImGui::Text("GPU trace %.2f ms/iteration", imguiData->LastTraceMs);
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
     ImGui::End();
 
@@ -350,6 +368,7 @@ int main(int argc, char** argv)
     }
 
     const char* sceneFile = argv[1];
+    bool headless = argc >= 3 && std::strcmp(argv[2], "--headless") == 0;
 
     // Load scene file
     scene = new Scene(sceneFile);
@@ -364,6 +383,27 @@ int main(int argc, char** argv)
     width = cam.resolution.x;
     height = cam.resolution.y;
 
+    if (headless)
+    {
+        InitDataContainer(guiData);
+        pathtraceInit(scene);
+        for (iteration = 1; iteration <= static_cast<int>(renderState->iterations); ++iteration)
+        {
+            pathtrace(NULL, 0, iteration);
+            if (iteration == 1 || iteration % 8 == 0 ||
+                iteration == static_cast<int>(renderState->iterations))
+            {
+                printf("Rendered %d / %u samples\n", iteration,
+                    renderState->iterations);
+            }
+        }
+        iteration = static_cast<int>(renderState->iterations);
+        saveImage();
+        pathtraceFree();
+        cudaDeviceReset();
+        return 0;
+    }
+
     glm::vec3 view = cam.view;
     glm::vec3 up = cam.up;
     glm::vec3 right = glm::cross(view, up);
@@ -373,12 +413,11 @@ int main(int argc, char** argv)
 
     // compute phi (horizontal) and theta (vertical) relative 3D axis
     // so, (0 0 1) is forward, (0 1 0) is up
-    glm::vec3 viewXZ = glm::vec3(view.x, 0.0f, view.z);
-    glm::vec3 viewZY = glm::vec3(0.0f, view.y, view.z);
-    phi = glm::acos(glm::dot(glm::normalize(viewXZ), glm::vec3(0, 0, -1)));
-    theta = glm::acos(glm::dot(glm::normalize(viewZY), glm::vec3(0, 1, 0)));
     ogLookAt = cam.lookAt;
-    zoom = glm::length(cam.position - ogLookAt);
+    glm::vec3 cameraOffset = cam.position - ogLookAt;
+    zoom = glm::length(cameraOffset);
+    phi = std::atan2(cameraOffset.x, cameraOffset.z);
+    theta = std::acos(glm::clamp(cameraOffset.y / zoom, -1.0f, 1.0f));
 
     // Initialize CUDA and GL components
     init();
@@ -395,17 +434,22 @@ int main(int argc, char** argv)
 
 void saveImage()
 {
-    float samples = iteration;
+    float samples = std::max(1, iteration);
     // output image file
     Image img(width, height);
+    Image hdr(width, height);
 
     for (int x = 0; x < width; x++)
     {
         for (int y = 0; y < height; y++)
         {
             int index = x + (y * width);
-            glm::vec3 pix = renderState->image[index];
-            img.setPixel(width - 1 - x, y, glm::vec3(pix) / samples);
+            glm::vec3 pix = glm::max(renderState->image[index] / samples,
+                glm::vec3(0.0f));
+            hdr.setPixel(width - 1 - x, y, pix);
+            glm::vec3 mapped = pix / (glm::vec3(1.0f) + pix);
+            img.setPixel(width - 1 - x, y,
+                glm::pow(mapped, glm::vec3(1.0f / 2.2f)));
         }
     }
 
@@ -416,6 +460,7 @@ void saveImage()
 
     // CHECKITOUT
     img.savePNG(filename);
+    hdr.saveHDR(filename);
     //img.saveHDR(filename);  // Save a Radiance HDR file
 }
 
@@ -432,8 +477,8 @@ void runCuda()
         cam.view = -glm::normalize(cameraPosition);
         glm::vec3 v = cam.view;
         glm::vec3 u = glm::vec3(0, 1, 0);//glm::normalize(cam.up);
-        glm::vec3 r = glm::cross(v, u);
-        cam.up = glm::cross(r, v);
+        glm::vec3 r = glm::normalize(glm::cross(v, u));
+        cam.up = glm::normalize(glm::cross(r, v));
         cam.right = r;
 
         cam.position = cameraPosition;

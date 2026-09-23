@@ -12,7 +12,17 @@
 enum GeomType
 {
     SPHERE,
-    CUBE
+    CUBE,
+    TORUS,
+    WOVEN_RING,
+    GYROID
+};
+
+enum TextureType
+{
+    SOLID,
+    CHECKER,
+    MARBLE
 };
 
 struct Ray
@@ -36,6 +46,9 @@ struct Geom
 struct Material
 {
     glm::vec3 color;
+    glm::vec3 secondaryColor;
+    TextureType texture;
+    float textureScale;
     struct
     {
         float exponent;
@@ -57,6 +70,8 @@ struct Camera
     glm::vec3 right;
     glm::vec2 fov;
     glm::vec2 pixelLength;
+    float aperture;
+    float focusDistance;
 };
 
 struct RenderState
@@ -74,6 +89,7 @@ struct PathSegment
     glm::vec3 color;
     int pixelIndex;
     int remainingBounces;
+    bool specularBounce;
 };
 
 // Use with a corresponding PathSegment to do:
@@ -84,4 +100,7 @@ struct ShadeableIntersection
   float t;
   glm::vec3 surfaceNormal;
   int materialId;
+  int geomIndex;
+  glm::vec3 objectPoint;
+  bool outside;
 };

@@ -43,21 +43,31 @@ void Scene::loadFromJSON(const std::string& jsonName)
         const auto& p = item.value();
         Material newMaterial{};
         // TODO: handle materials loading differently
-        if (p["TYPE"] == "Diffuse")
+        const auto& col = p["RGB"];
+        newMaterial.color = glm::vec3(col[0], col[1], col[2]);
+        newMaterial.secondaryColor = newMaterial.color;
+        newMaterial.texture = SOLID;
+        newMaterial.textureScale = p.value("TEXTURE_SCALE", 8.0f);
+        if (p.contains("RGB2"))
         {
-            const auto& col = p["RGB"];
-            newMaterial.color = glm::vec3(col[0], col[1], col[2]);
+            const auto& secondary = p["RGB2"];
+            newMaterial.secondaryColor = glm::vec3(secondary[0], secondary[1], secondary[2]);
         }
-        else if (p["TYPE"] == "Emitting")
+        const std::string texture = p.value("TEXTURE", std::string("Solid"));
+        if (texture == "Checker") newMaterial.texture = CHECKER;
+        if (texture == "Marble") newMaterial.texture = MARBLE;
+        if (p["TYPE"] == "Emitting")
         {
-            const auto& col = p["RGB"];
-            newMaterial.color = glm::vec3(col[0], col[1], col[2]);
             newMaterial.emittance = p["EMITTANCE"];
         }
         else if (p["TYPE"] == "Specular")
         {
-            const auto& col = p["RGB"];
-            newMaterial.color = glm::vec3(col[0], col[1], col[2]);
+            newMaterial.hasReflective = 1.0f;
+        }
+        else if (p["TYPE"] == "Glass" || p["TYPE"] == "Refractive")
+        {
+            newMaterial.hasRefractive = 1.0f;
+            newMaterial.indexOfRefraction = p.value("IOR", 1.5f);
         }
         MatNameToID[name] = materials.size();
         materials.emplace_back(newMaterial);
@@ -66,10 +76,22 @@ void Scene::loadFromJSON(const std::string& jsonName)
     for (const auto& p : objectsData)
     {
         const auto& type = p["TYPE"];
-        Geom newGeom;
+        Geom newGeom{};
         if (type == "cube")
         {
             newGeom.type = CUBE;
+        }
+        else if (type == "torus")
+        {
+            newGeom.type = TORUS;
+        }
+        else if (type == "woven_ring")
+        {
+            newGeom.type = WOVEN_RING;
+        }
+        else if (type == "gyroid")
+        {
+            newGeom.type = GYROID;
         }
         else
         {
@@ -105,14 +127,18 @@ void Scene::loadFromJSON(const std::string& jsonName)
     camera.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
     camera.up = glm::vec3(up[0], up[1], up[2]);
     camera.view = glm::normalize(camera.lookAt - camera.position);
+    camera.aperture = cameraData.value("APERTURE", 0.0f);
+    camera.focusDistance = cameraData.value("FOCUS_DISTANCE",
+        glm::length(camera.lookAt - camera.position));
 
     //calculate fov based on resolution
-    float yscaled = tan(fovy * (PI / 180));
+    float yscaled = tan(fovy * (PI / 360));
     float xscaled = (yscaled * camera.resolution.x) / camera.resolution.y;
     float fovx = (atan(xscaled) * 180) / PI;
     camera.fov = glm::vec2(fovx, fovy);
 
     camera.right = glm::normalize(glm::cross(camera.view, camera.up));
+    camera.up = glm::normalize(glm::cross(camera.right, camera.view));
     camera.pixelLength = glm::vec2(2 * xscaled / (float)camera.resolution.x,
         2 * yscaled / (float)camera.resolution.y);
 
