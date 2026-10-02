@@ -211,7 +211,7 @@ No CPU renderer was benchmarked. These are expected execution differences, not m
 | Roulette | Both save expected continuation work and increase variance. GPU savings improve when termination reduces scheduled threads. | Reweighting plus compaction. Tune with equal-quality experiments. |
 | OBJ / mesh BVH | Rejection helps either device; CPU construction precedes timing. GPU rays traverse concurrently, but divergent branches/accesses limit efficiency. | Stackless escape links and nearest-hit pruning. Try SAH, near-first order, configurable leaves. |
 
-## Bloopers: the gallery has a rabbit problem
+## Bloopers
 
 ### Bunnyzilla
 
