@@ -24,6 +24,11 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <filesystem>
+#include <iomanip>
+#include <chrono>
+#include <set>
+#include <stdexcept>
 
 static std::string startTimeString;
 
@@ -300,9 +305,13 @@ void RenderImGui()
     //ImGui::SameLine();
     //ImGui::Text("counter = %d", counter);
     ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
-    ImGui::Checkbox("Sort paths by material", &imguiData->MaterialSortingEnabled);
-    ImGui::Checkbox("Direct area lighting", &imguiData->DirectLightingEnabled);
-    ImGui::Checkbox("Russian roulette", &imguiData->RussianRouletteEnabled);
+    bool settingsChanged = ImGui::Checkbox("Sort paths by material", &imguiData->MaterialSortingEnabled);
+    settingsChanged |= ImGui::Checkbox("Direct area lighting", &imguiData->DirectLightingEnabled);
+    settingsChanged |= ImGui::Checkbox("Russian roulette", &imguiData->RussianRouletteEnabled);
+    settingsChanged |= ImGui::Checkbox("Compact terminated paths", &imguiData->CompactionEnabled);
+    settingsChanged |= ImGui::Checkbox("Mesh BVH", &imguiData->MeshBVHEnabled);
+    settingsChanged |= ImGui::Checkbox("Stochastic antialiasing", &imguiData->AntialiasingEnabled);
+    if (settingsChanged) camchanged = true;
     ImGui::Text("GPU trace %.2f ms/iteration", imguiData->LastTraceMs);
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
     ImGui::End();
@@ -363,18 +372,92 @@ int main(int argc, char** argv)
 
     if (argc < 2)
     {
-        printf("Usage: %s SCENEFILE.json\n", argv[0]);
+        printf("Usage: %s SCENEFILE.json [--headless] [--sort on|off] [--compact on|off]\n"
+            "  [--direct-light on|off] [--rr on|off] [--bvh on|off] [--aa on|off]\n"
+            "  [--iterations N] [--depth N] [--aperture R] [--seed N]\n"
+            "  [--output PREFIX] [--timings FILE.csv] [--stats FILE.csv]\n"
+            "  [--checkpoints 1,8,32,128] [--no-save]\n", argv[0]);
         return 1;
     }
 
     const char* sceneFile = argv[1];
-    bool headless = argc >= 3 && std::strcmp(argv[2], "--headless") == 0;
+    bool headless = false;
+    bool noSave = false;
+    std::string timingsPath, statisticsPath;
+    std::set<int> checkpoints;
 
     // Load scene file
-    scene = new Scene(sceneFile);
+    try { scene = new Scene(sceneFile); }
+    catch (const std::exception& error)
+    {
+        fprintf(stderr, "Scene error: %s\n", error.what());
+        return 1;
+    }
 
     //Create Instance for ImGUIData
     guiData = new GuiDataContainer();
+    try
+    {
+        for (int i = 2; i < argc; ++i)
+        {
+            std::string option = argv[i];
+            if (option == "--headless") { headless = true; continue; }
+            if (option == "--no-save") { noSave = true; continue; }
+            if (++i >= argc) throw std::runtime_error("Missing value for " + option);
+            std::string value = argv[i];
+            auto switchValue = [&]() {
+                if (value != "on" && value != "off") throw std::runtime_error(option + " expects on or off");
+                return value == "on";
+            };
+            if (option == "--sort") guiData->MaterialSortingEnabled = switchValue();
+            else if (option == "--compact") guiData->CompactionEnabled = switchValue();
+            else if (option == "--direct-light") guiData->DirectLightingEnabled = switchValue();
+            else if (option == "--rr") guiData->RussianRouletteEnabled = switchValue();
+            else if (option == "--bvh") guiData->MeshBVHEnabled = switchValue();
+            else if (option == "--aa") guiData->AntialiasingEnabled = switchValue();
+            else if (option == "--iterations")
+            {
+                int count = std::stoi(value);
+                if (count < 1 || count > 1000000) throw std::runtime_error("Iterations must be 1..1000000");
+                scene->state.iterations = count;
+            }
+            else if (option == "--depth")
+            {
+                int depth = std::stoi(value);
+                if (depth < 1 || depth > 64) throw std::runtime_error("Depth must be 1..64");
+                scene->state.traceDepth = depth;
+            }
+            else if (option == "--seed")
+            {
+                guiData->SeedOffset = std::stoi(value);
+                if (guiData->SeedOffset < 0 || guiData->SeedOffset > 1000000)
+                    throw std::runtime_error("Seed offset must be 0..1000000");
+            }
+            else if (option == "--aperture")
+            {
+                scene->state.camera.aperture = std::stof(value);
+                if (!std::isfinite(scene->state.camera.aperture) || scene->state.camera.aperture < 0)
+                    throw std::runtime_error("Aperture must be finite and nonnegative");
+            }
+            else if (option == "--output") scene->state.imageName = value;
+            else if (option == "--timings") timingsPath = value;
+            else if (option == "--stats") statisticsPath = value;
+            else if (option == "--checkpoints")
+            {
+                std::istringstream values(value);
+                std::string item;
+                while (std::getline(values, item, ',')) checkpoints.insert(std::stoi(item));
+            }
+            else throw std::runtime_error("Unknown option: " + option);
+        }
+        if (!headless && (!timingsPath.empty() || !statisticsPath.empty() || noSave || !checkpoints.empty()))
+            throw std::runtime_error("Timing, statistics, checkpoints and no-save options require --headless");
+    }
+    catch (const std::exception& error)
+    {
+        fprintf(stderr, "Argument error: %s\n", error.what());
+        return 1;
+    }
 
     // Set up camera stuff from loaded path tracer settings
     iteration = 0;
@@ -385,11 +468,55 @@ int main(int argc, char** argv)
 
     if (headless)
     {
+        auto openCSV = [](const std::string& filename, std::ofstream& stream) {
+            if (filename.empty()) return;
+            std::filesystem::path path(filename);
+            if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path());
+            stream.open(path);
+            if (!stream) throw std::runtime_error("Cannot write CSV: " + filename);
+            stream << std::setprecision(9);
+        };
+        std::ofstream timings, statistics;
+        try
+        {
+            openCSV(timingsPath, timings);
+            openCSV(statisticsPath, statistics);
+            std::filesystem::path output(renderState->imageName);
+            if (!noSave && output.has_parent_path()) std::filesystem::create_directories(output.parent_path());
+        }
+        catch (const std::exception& error)
+        {
+            fprintf(stderr, "Output error: %s\n", error.what());
+            return 1;
+        }
+        if (timings) timings << "iteration,gpu_ms\n";
+        if (statistics) statistics << "iteration,bounce,rays_in,rays_alive,rays_scheduled,camera_ms,intersection_ms,sorting_ms,shading_ms,gather_ms,compaction_ms,iteration_gpu_ms\n";
+        enableTraceStatistics(!statisticsPath.empty());
         InitDataContainer(guiData);
         pathtraceInit(scene);
+        int device;
+        cudaGetDevice(&device);
+        cudaDeviceProp properties;
+        cudaGetDeviceProperties(&properties, device);
+        printf("GPU: %s | %d x %d | depth %d | sort %d compact %d direct %d rr %d bvh %d aa %d\n",
+            properties.name, width, height, renderState->traceDepth,
+            guiData->MaterialSortingEnabled, guiData->CompactionEnabled,
+            guiData->DirectLightingEnabled, guiData->RussianRouletteEnabled,
+            guiData->MeshBVHEnabled, guiData->AntialiasingEnabled);
+        auto renderStart = std::chrono::steady_clock::now();
         for (iteration = 1; iteration <= static_cast<int>(renderState->iterations); ++iteration)
         {
             pathtrace(NULL, 0, iteration);
+            if (timings) timings << iteration << ',' << guiData->LastTraceMs << '\n';
+            if (statistics)
+            {
+                for (const auto& s : lastBounceStatistics())
+                    statistics << iteration << ',' << s.depth << ',' << s.raysIn << ','
+                        << s.raysAlive << ',' << s.raysScheduled << ',' << s.cameraMs << ','
+                        << s.intersectionMs << ',' << s.sortingMs << ',' << s.shadingMs << ','
+                        << s.gatherMs << ',' << s.compactionMs << ',' << guiData->LastTraceMs << '\n';
+            }
+            if (!noSave && checkpoints.count(iteration) && iteration < static_cast<int>(renderState->iterations)) saveImage();
             if (iteration == 1 || iteration % 8 == 0 ||
                 iteration == static_cast<int>(renderState->iterations))
             {
@@ -397,8 +524,10 @@ int main(int argc, char** argv)
                     renderState->iterations);
             }
         }
+        printf("Render loop wall time: %.3f s (initialization and final image encoding excluded)\n",
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - renderStart).count());
         iteration = static_cast<int>(renderState->iterations);
-        saveImage();
+        if (!noSave) saveImage();
         pathtraceFree();
         cudaDeviceReset();
         return 0;

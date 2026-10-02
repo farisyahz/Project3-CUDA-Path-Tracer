@@ -15,7 +15,8 @@ enum GeomType
     CUBE,
     TORUS,
     WOVEN_RING,
-    GYROID
+    GYROID,
+    MESH
 };
 
 enum TextureType
@@ -41,6 +42,24 @@ struct Geom
     glm::mat4 transform;
     glm::mat4 inverseTransform;
     glm::mat4 invTranspose;
+    int triangleStart;
+    int triangleCount;
+    int bvhRoot;
+};
+
+struct Triangle
+{
+    glm::vec3 v0, v1, v2;
+    glm::vec3 n0, n1, n2;
+};
+
+// Preorder nodes use escape links, so GPU traversal needs neither recursion nor a stack.
+struct MeshBVHNode
+{
+    glm::vec3 minimum, maximum;
+    int first;
+    int count;
+    int escape;
 };
 
 struct Material

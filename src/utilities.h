@@ -24,6 +24,10 @@ public:
     bool MaterialSortingEnabled;
     bool DirectLightingEnabled;
     bool RussianRouletteEnabled;
+    bool CompactionEnabled = true;
+    bool MeshBVHEnabled = true;
+    bool AntialiasingEnabled = true;
+    int SeedOffset = 0;
 };
 
 namespace utilityCore
